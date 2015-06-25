@@ -124,7 +124,6 @@ class Controller(wsgi.Controller):
         self.compute_api = compute.API()
         self.image_api = nova.image.API()
         self.ext_mgr = ext_mgr
-        LOG.debug("\n$$$$$$$$$$$$$$$$$$$$$$$$$$$ ext-mgr is "+str(ext_mgr.__class__.__name__))
 
     def index(self, req):
         """Returns a list of server names and ids for a given user."""
@@ -210,11 +209,13 @@ class Controller(wsgi.Controller):
             except ValueError as err:
                 raise exception.InvalidInput(six.text_type(err))
 
+        elevated = None
         if 'all_tenants' in search_opts:
             policy.enforce(context, 'compute:get_all_tenants',
                            {'project_id': context.project_id,
                             'user_id': context.user_id})
             del search_opts['all_tenants']
+            elevated = context.elevated()
         else:
             if context.project_id:
                 search_opts['project_id'] = context.project_id
@@ -227,7 +228,7 @@ class Controller(wsgi.Controller):
         if self.ext_mgr.is_loaded('os-server-sort-keys'):
             sort_keys, sort_dirs = common.get_sort_params(req.params)
         try:
-            instance_list = self.compute_api.get_all(context,
+            instance_list = self.compute_api.get_all(elevated or context,
                                                      search_opts=search_opts,
                                                      limit=limit,
                                                      marker=marker,
@@ -513,13 +514,14 @@ class Controller(wsgi.Controller):
                         raise exc.HTTPBadRequest(explanation=msg)
             except (exception.NotFound, exception.InvalidImageRef):
                 explanation = _("Image not found.")
-		raise exc.HTTPNotFound(explanation=explanation)
+                raise exc.HTTPNotFound(explanation=explanation)
 
     @wsgi.response(202)
     def create(self, req, body):
         """Creates a new server for a given user."""
         if not self.is_valid_body(body, 'server'):
             raise exc.HTTPUnprocessableEntity()
+
         context = req.environ['nova.context']
         server_dict = body['server']
         password = self._get_server_admin_password(server_dict)
@@ -527,14 +529,12 @@ class Controller(wsgi.Controller):
         if 'name' not in server_dict:
             msg = _("Server name is not defined")
             raise exc.HTTPBadRequest(explanation=msg)
-	    LOG.debug("\n+++++++++++++ dict of server is %s"%(server_dict))
-	    print ("\n+++++ dict of server us %s"%(server_dict))
+
         name = server_dict['name']
         self._validate_server_name(name)
         name = name.strip()
 
         image_uuid = self._image_from_req_data(body)
-    	LOG.debug("\n++++++++ image_uuid is %s"%(image_uuid))
 
         personality = server_dict.get('personality')
         config_drive = None
@@ -562,7 +562,7 @@ class Controller(wsgi.Controller):
                     raise exc.HTTPBadRequest(explanation=msg)
         if not sg_names:
             sg_names.append('default')
-	    print "\n++++++ reaching dest 2 "
+
         sg_names = list(set(sg_names))
 
         requested_networks = self._determine_requested_networks(server_dict)
@@ -598,7 +598,6 @@ class Controller(wsgi.Controller):
         # 'max_count' to be 'min_count'.
         min_count = 1
         max_count = 1
-        print "\n++++++ reaching dest 3 "
         if self.ext_mgr.is_loaded('os-multiple-create'):
             ret_resv_id = server_dict.get('return_reservation_id', False)
             min_count = server_dict.get('min_count', 1)
@@ -619,6 +618,7 @@ class Controller(wsgi.Controller):
         auto_disk_config = False
         if self.ext_mgr.is_loaded('OS-DCF'):
             auto_disk_config = server_dict.get('auto_disk_config')
+
         scheduler_hints = {}
         if self.ext_mgr.is_loaded('OS-SCH-HNT'):
             scheduler_hints = server_dict.get('scheduler_hints', {})
@@ -665,7 +665,7 @@ class Controller(wsgi.Controller):
         except UnicodeDecodeError as error:
             msg = "UnicodeError: %s" % error
             raise exc.HTTPBadRequest(explanation=msg)
-        except Exception as error:
+        except Exception:
             # The remaining cases can be handled in a standard fashion.
             self._handle_create_exception(*sys.exc_info())
 
@@ -901,12 +901,7 @@ class Controller(wsgi.Controller):
         image_ref = data['server'].get('imageRef')
         bdm = data['server'].get('block_device_mapping')
         bdm_v2 = data['server'].get('block_device_mapping_v2')
-	print "bdm is %s"%(bdm)
-	print "bdm_v2 is %s"%(bdm_v2)
-	if self.ext_mgr.is_loaded('os-volumes'):
-	    print "os volume is loaded"
-	if self.ext_mgr.is_loaded('os-block-device-mapping-v2-boot'):
-	    print "os volume v2 is loaded"
+
         if (not image_ref and (
                 (bdm and self.ext_mgr.is_loaded('os-volumes')) or
                 (bdm_v2 and
@@ -955,7 +950,7 @@ class Controller(wsgi.Controller):
     def _validate_metadata(self, metadata):
         """Ensure that we can work with the metadata given."""
         try:
-            metadata.iteritems()
+            six.iteritems(metadata)
         except AttributeError:
             msg = _("Unable to parse metadata key/value pairs.")
             LOG.debug(msg)
@@ -1113,6 +1108,10 @@ class Controller(wsgi.Controller):
         try:
             if self.compute_api.is_volume_backed_instance(context, instance,
                                                           bdms):
+                policy.enforce(context,
+                        'compute:snapshot_volume_backed',
+                        {'project_id': context.project_id,
+                        'user_id': context.user_id})
                 img = instance.image_ref
                 if not img:
                     properties = bdms.root_metadata(

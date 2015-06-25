@@ -44,6 +44,9 @@ import nova.image
 from nova import objects
 from nova import utils
 
+GB_TO_MB = 1024
+MB_TO_KB = 1024
+
 ALIAS = 'servers'
 
 CONF = cfg.CONF
@@ -143,7 +146,7 @@ class ServersController(wsgi.Controller):
         self.extension_info = kwargs.pop('extension_info')
         super(ServersController, self).__init__(**kwargs)
         self.compute_api = compute.API(skip_policy_check=True)
-        self.image_api = nova.image.API(skip_policy_check=True)
+        self.image_api = nova.image.API()
 
         # Look for implementation of extension point of server creation
         self.create_extension_manager = \
@@ -356,12 +359,14 @@ class ServersController(wsgi.Controller):
             except ValueError as err:
                 raise exception.InvalidInput(six.text_type(err))
 
+        elevated = None
         if 'all_tenants' in search_opts:
             if is_detail:
                 authorize(context, action="detail:get_all_tenants")
             else:
                 authorize(context, action="index:get_all_tenants")
             del search_opts['all_tenants']
+            elevated = context.elevated()
         else:
             if context.project_id:
                 search_opts['project_id'] = context.project_id
@@ -371,7 +376,7 @@ class ServersController(wsgi.Controller):
         limit, marker = common.get_limit_and_marker(req)
         sort_keys, sort_dirs = common.get_sort_params(req.params)
         try:
-            instance_list = self.compute_api.get_all(context,
+            instance_list = self.compute_api.get_all(elevated or context,
                     search_opts=search_opts, limit=limit, marker=marker,
                     want_objects=True, expected_attrs=['pci_devices'],
                     sort_keys=sort_keys, sort_dirs=sort_dirs)
@@ -491,7 +496,25 @@ class ServersController(wsgi.Controller):
         authorize(context, action="show")
         req.cache_db_instance(instance)
         return self._view_builder.show(req, instance)
-    @extemnsions.expected_errors(404,400)
+
+    def _validate_volume_size_with_image_size(self, context,
+                         block_device_mapping):
+        for bdm in block_device_mapping:
+            try:
+                image_uuid = bdm.get('image_id')
+                if image_uuid is None:
+                    return
+                image = self.image_api.get(context, image_uuid)
+                size = image.get("size")
+                vol_size = bdm.get('volume_size')
+                if isinstance(vol_size, int):
+                    if(vol_size * GB_TO_MB * MB_TO_KB < size):
+                        msg = _("Image size greater than volume size")
+                        raise exc.HTTPBadRequest(explanation=msg)
+            except (exception.NotFound, exception.InvalidImageRef):
+                explanation = _("Image not found.")
+                raise exc.HTTPNotFound(explanation=explanation)
+
     def _validate_volume_size_with_image_size(self, context,
                          block_device_mapping):
         for bdm in block_device_mapping:
@@ -552,7 +575,7 @@ class ServersController(wsgi.Controller):
                 authorize(context, {}, 'create:forced_host')
 
         block_device_mapping = create_kwargs.get("block_device_mapping")
-        if block_device_mapping is Not None:
+        if block_device_mapping is not None:
             self._validate_volume_size_with_image_size(context,
                                   block_device_mapping)
             
@@ -587,7 +610,7 @@ class ServersController(wsgi.Controller):
 
         try:
             flavor_id = self._flavor_id_from_req_data(body)
-        except ValueError as error:
+        except ValueError:
             msg = _("Invalid flavorRef provided.")
             raise exc.HTTPBadRequest(explanation=msg)
 
@@ -1055,6 +1078,7 @@ class ServersController(wsgi.Controller):
         try:
             if self.compute_api.is_volume_backed_instance(context, instance,
                                                           bdms):
+                authorize(context, action="create_image:allow_volume_backed")
                 img = instance.image_ref
                 if not img:
                     properties = bdms.root_metadata(
