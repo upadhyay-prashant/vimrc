@@ -1,0 +1,5 @@
+alias c='clear'
+alias h='history'
+alias hnb='h| grep boot| grep nova'
+alias hg='h| grep glance '
+alias src='source ~/.bashrc'
