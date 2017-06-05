@@ -1,6 +1,11 @@
-se nu
+se hlsearch
 se ic
-set hlsearch
-set expandtab
-set tabstop=4
-set shiftwidth=4
+se nu
+se tabstop=2
+se shiftwidth=2
+se expandtab
+syntax on
+se autoindent
+nnoremap H gT
+nnoremap L gt
+nnoremap ds <C-W>gF
